@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <uuid/uuid.h>
+#include <errno.h>
 #include "db.h"
 
 #define COUNT 100000L
@@ -32,73 +33,70 @@ int main(){
     }
 
     unlink(PATH);
-    db = NULL;
+
     assert(db_create(PATH,DB_STRINGKEY,64) == 0);
+
+    // bench insert
     assert(db_open(&db,PATH) ==0);
 
     t = clock();
     for(i=0;i<COUNT;i++){
-        // printf("start insert %s\n", uuid_set[i]);
         strcpy(value,uuid_set[i]);
-        rc = db_insert(db, uuid_set[i], value, strlen(value), 0);
+        rc = db_insert(db, uuid_set[i], value, strlen(value));
         assert(rc);
     }
     t = clock() - t;
     printf("insert %ld use %ldus, per %lfus\n", COUNT, t, t/(double)COUNT);
+    db_close(db);
+    // ------------------------------------
+
+    // bench search
+    assert(db_open(&db,PATH) ==0);
 
     t = clock();
     for(i=0;i<COUNT;i++){
-        // printf("start search %s\n", uuid_set[i]);
         memset(value, 0, sizeof(value));
         rc = db_search(db, uuid_set[i], value, sizeof(value));
         assert(rc && strcmp(uuid_set[i], value) == 0);
-        // printf("search success %s %s\n",uuid_set[i],value);
     }
     t = clock() - t;
     printf("search %ld use %ldus, per %lfus\n", COUNT, t, t/(double)COUNT);
+    db_close(db);
+    // ------------------------------------
+
+    // bench delete
+    assert(db_open(&db,PATH) ==0);
 
     t = clock();
     for(i=0;i<COUNT;i++){
-        // printf("start insert %s\n", uuid_set[i]);
-        strcpy(value,uuid_set[i]);
-        value[0] = ' ';
-        rc = db_insert(db, uuid_set[i], value, strlen(value), 1);
+        memset(value,0,sizeof(value));
+        rc = db_delete(db,uuid_set[i]);
         assert(rc);
     }
     t = clock() - t;
-    printf("insert overwrite %ld use %ldus, per %lfus\n", COUNT, t, t/(double)COUNT);
-
-    t = clock();
-    for(i=0;i<COUNT;i++){
-        // printf("start search %s\n", uuid_set[i]);
-        memset(value, 0, sizeof(value));
-        rc = db_search(db, uuid_set[i], value, sizeof(value));
-        assert(rc && value[0] == ' ' && strcmp(&uuid_set[i][1], &value[1]) == 0);
-        // printf("search success %s %s\n", uuid_set[i], value);
-    }
-    t = clock() - t;
-    printf("search overwrite %ld use %ldus, per %lfus\n", COUNT, t, t/(double)COUNT);
-
-    t = clock();
-    for(i=0;i<COUNT;i++){
-        // printf("start delete %s\n", uuid_set[i]);
-        memset(value,0,sizeof(value));
-        rc = db_delete(db,uuid_set[i],value,sizeof(value));
-        assert(rc && value[0] == ' ' && strcmp(&uuid_set[i][1], &value[1]) == 0);
-    }
-    t = clock() - t;
     printf("delete %ld use %ldus, per %lfus\n",COUNT,t,t/(double)COUNT);
+    db_close(db);
+    // ------------------------------------
 
-
+    // bench search
+    assert(db_open(&db,PATH) ==0);
+    
     t = clock();
     for(i=0;i<COUNT;i++){
-        // printf("start search %s\n", uuid_set[i]);
         memset(value,0,sizeof(value));
         rc = db_search(db,uuid_set[i],value,sizeof(value));
-        assert(rc == -1);
+        assert(rc == -1 && errno == ENOMSG);
     }
     t = clock() - t;
     printf("search %ld use %ldus, per %lfus\n",COUNT,t,t/(double)COUNT);
 
+    db_close(db);
+    // ------------------------------------
+    
+    for(i=0;i<COUNT;i++){
+        free(uuid_set[i]);
+    }
+    free(uuid_set);
+    
     return 0;
 }

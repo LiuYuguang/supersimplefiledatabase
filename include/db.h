@@ -9,22 +9,22 @@
 
 typedef struct db_s db_t;
 
-#define DB_STRINGKEY 0
-#define DB_BYTESKEY  1
-#define DB_INT32KEY  2
-#define DB_INT64KEY  3
+#define DB_STRINGKEY 0 // 4 <= max_key_size <= 128, include '\0' 包含'\0'在内
+#define DB_BYTESKEY  1 // 4 <= max_key_size <= 128
+#define DB_INT32KEY  2 // max_key_size = sizeof(int32_t)
+#define DB_INT64KEY  3 // max_key_size = sizeof(int64_t)
 
 /**
- * @brief create dateabase file, mode default 0664
+ * @brief create dateabase file, mode default 0664 创建数据库
  * @param[in] path 
  * @param[in] key_type DB_STRINGKEY, DB_BYTESKEY, DB_INT32KEY, DB_INT64KEY
- * @param[in] max_key_size DB_INT32KEY: sizeof(int32_t), DB_INT64KEY: sizeof(int64_t), DB_STRINGKEY: 4 <= strlen() < 128, DB_BYTESKEY: 4 <= size <= 128
+ * @param[in] max_key_size
  * @return ==0 if successful, ==-1 error
 */
 int db_create(char *path, int key_type, size_t max_key_size);
 
 /**
- * @brief open dateabase file
+ * @brief open dateabase file 打开数据库
  * @param[in] db
  * @param[in] path
  * @return ==0 if successful, ==-1 error
@@ -32,46 +32,36 @@ int db_create(char *path, int key_type, size_t max_key_size);
 int db_open(db_t **db, char *path);
 
 /**
- * @brief verify if dateabase file data correct
- * @param[in] db
- * @return ==0 if successful, ==-1 error
-*/
-int db_verify(db_t *db);
-
-/**
- * @brief close dateabase file
+ * @brief close dateabase file 关闭数据库
  * @param[in] db
 */
 void db_close(db_t *db);
 
 /**
- * @brief insert key
+ * @brief insert key 插入值
  * @param[in] db
- * @param[in] key key_size can't exceed max_key_size
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
  * @param[in] value
- * @param[in] value_size value_size can't too large
- * @param[in] overwrite 0 no overwrite, else overwrite
- * @return ==0 if successful, ==-1 error
+ * @param[in] value_size value_size can't too large 不能太大
+ * @return ==1 if success, ==0 if key repeat, ==-1 error
 */
-int db_insert(db_t* db, void* key, void *value, size_t value_size, int overwrite);
+int db_insert(db_t* db, void* key, void *value, size_t value_size);
 
 /**
- * @brief delete key
+ * @brief delete key 删除值
  * @param[in] db
- * @param[in] key key_size can't exceed max_key_size
- * @param[out] value, 
- * @param[in] value_size 
- * @return ==0 if successful, ==-1 error
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
+ * @return ==1 if success, ==0 if key no found, ==-1 error
 */
-int db_delete(db_t* db, void* key, void *value, size_t value_size);
+int db_delete(db_t* db, void* key);
 
 /**
- * @brief search key
+ * @brief search key 查询值
  * @param[in] db
- * @param[in] key key_size can't exceed max_key_size
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
  * @param[out] value
- * @param[in] value_size
- * @return ==0 if successful, ==-1 error
+ * @param[in] value_size 需要保证空间足够大
+ * @return >=0 if success, ==-1 error
 */
 int db_search(db_t* db, void* key, void *value, size_t value_size);
 
