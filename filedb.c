@@ -1,8 +1,11 @@
 /*
  * Copyright (C) 2022, LiuYuguang <l13660020946@live.com>
  */
+/**
+ * @brief 超简单的文件数据库
+ */
 
-#include "db.h"
+#include <stddef.h>            // for size_t
 #include <stdlib.h>            // for malloc(), free()
 #include <string.h>            // for memcpy(), memmove(), strcpy(), strlen()
 #include <fcntl.h>             // for open(), O_CREAT, O_RDWR, O_TRUNC
@@ -11,19 +14,33 @@
 #include <stdint.h>            // for int32_t
 #include <errno.h>             // for E2BIG
 
-#define DB_HEAD_SIZE  (4096UL) // head size must be pow of 2! 
-#define DB_BLOCK_SIZE (8192UL) // block size must be pow of 2!
+#define DB_HEAD_SIZE  (4096UL) // head size must be pow of 2! 文件数据库的头大小
+#define DB_BLOCK_SIZE (8192UL) // block size must be pow of 2! 文件数据库的数据块大小
 
-#define BTREE_NON_LEAF 0
-#define BTREE_LEAF     1
+#define BTREE_NON_LEAF 0 /** 非叶子节点 */
+#define BTREE_LEAF     1 /** 叶子节点 */
 
+/**
+ * @brief 存储数据对齐方式
+ */
 #define DB_ALIGNMENT       16
 #define db_align(d, a)     (((d) + (a - 1)) & ~(a - 1))
 
 #define ceil(M) (((M)-1)/2)
 
+/**
+ * @brief 数据块类型
+ */
 #define TYPE_KEY   0
 #define TYPE_VALUE 1
+
+/**
+ * @brief 创建数据库时，指定的key类型
+ */
+#define DB_STRINGKEY 0 /** 4 <= max_key_size <= 128, include '\0', 包含'\0'在内 */
+#define DB_BYTESKEY  1 /** 4 <= max_key_size <= 128 */
+#define DB_INT32KEY  2 /** max_key_size = sizeof(int32_t) */
+#define DB_INT64KEY  3 /** max_key_size = sizeof(int64_t) */
 
 typedef struct{
     off_t value;
@@ -36,31 +53,37 @@ typedef struct{
     unsigned char value[0];
 }btree_value;
 
+/**
+ * @brief 文件数据库的数据块的头
+ */
 typedef struct{
-    off_t self;       // block position 文件位置
-    size_t num;       // num of btree_key or btree_value
-    off_t free;       // when block free, it will join free list
-    uint32_t leaf:1;  // whether BTREE_NON_LEAF or BTREE_LEAF
-    uint32_t use:1;   // 
-    uint32_t type:1;  // whether TYPE_KEY or TYPE_VALUE
-    uint32_t last:29; // when type is TYPE_VALUE, last mean rest unuse space, [ sizeof(btree_node) : DB_BLOCK_SIZE )
+    off_t self;       /** 数据块位置 */
+    size_t num;       /** 当前数据块作为btree_key时，表示btree节点的关键字数；当前数据块作为btree_value时，表示块的引用数 */
+    off_t free;       /** 空闲链表节点 */
+    uint32_t use:1;   /** 当前数据块是否被使用 */
+    uint32_t type:1;  /** 当前数据块作为btree_key或btree_value */
+    uint32_t leaf:1;  /** 当前数据块作为btree_key时，表示节点为叶子节点或非叶子节点 */
+    uint32_t last:29; /** 当前数据块作为btree_value时，表示数据块未分配的空间 */
 }btree_node;
 
 #define btree_key_ptr(db,node,n) ((btree_key*)((char *)(node) + sizeof(*node) + (db->key_align) * (n)))
 #define btree_value_ptr(node,n) ((btree_value*)((char *)(node) + (n)))
 
+/**
+ * @brief 文件数据库的头，即是句柄
+ */
 typedef struct db_s{
-    int fd;
-    int key_type;
-    size_t key_size;
-    size_t key_align;                  // btree_key对齐
-    size_t M;
-    size_t key_total;
-    size_t key_use_block;
-    size_t value_use_block;
-    off_t free;                         // free list 空闲链表
-    off_t current;                      // current block for TYPE_VALUE
-    int (*key_cmp)(void*,void*,size_t);
+    int fd;                             /** 文件句柄 */
+    int key_type;                       /** key类型，必须在创建文件数据库时指定 */
+    size_t key_size;                    /** key的最大长度 */
+    size_t key_align;                   /** 对齐，值 = db_align(sizeof(btree_key) + key_size, DB_ALIGNMENT) */
+    size_t M;                           /** Btree 节点child的最大值 */
+    size_t key_total;                   /** 已存储的key总数 */
+    size_t key_use_block;               /** 数据块为btree_key类型的总数 */
+    size_t value_use_block;             /** 数据块为btree_value类型的总数 */ 
+    off_t free;                         /** 空闲链表的头 */
+    off_t current;                      /** 当前作为btree_value的数据块，未用完分配空间 */
+    int (*key_cmp)(void*,void*,size_t); /** key比较方式 */
 }db_t;
 
 static int cmp_string(void *a, void *b, size_t n){
@@ -79,6 +102,9 @@ static int cmp_int64(void *a, void *b, size_t n){
     return *(int64_t*)a - *(int64_t*)b;
 }
 
+/** 
+ * @brief 读出文件数据库的头，即是句柄
+*/
 inline static ssize_t head_seek(db_t *db){
     int fd = db->fd;
     int (*key_cmp)(void*,void*,size_t) = db->key_cmp;
@@ -88,28 +114,43 @@ inline static ssize_t head_seek(db_t *db){
     return rc;
 }
 
+/** 
+ * @brief 写入文件数据库的头，即是句柄
+*/
 inline static ssize_t head_flush(db_t *db){
     return pwrite(db->fd,db,DB_HEAD_SIZE,0);
 }
 
+/** 
+ * @brief 读出文件数据库的数据块
+*/
 inline static ssize_t node_seek(db_t *db, btree_node* node, off_t offset){
     return pread(db->fd,node,DB_BLOCK_SIZE,offset);
 }
 
+/** 
+ * @brief 写入文件数据库的数据块
+*/
 inline static ssize_t node_flush(db_t *db, btree_node *node){
     return pwrite(db->fd,node,DB_BLOCK_SIZE,node->self);
 }
 
+/** 
+ * @brief 分配文件数据库的数据块
+*/
 inline static int node_create(db_t *db, btree_node* node, int leaf, int type){
     if(db->free != 0L){
+        // 空闲链表不为空
         node_seek(db,node,db->free);
         db->free = node->free;
     }else{
+        // 空闲链表为空，在文件尾追加
         struct stat stat;
         fstat(db->fd,&stat);
         memset(node,0,DB_BLOCK_SIZE);
         node->self = stat.st_size;
         if(node_flush(db,node) != DB_BLOCK_SIZE){
+            // 存储空间不够时，只会写入部分数据
             ftruncate(db->fd, stat.st_size);
             errno = ENOMEM;
             return -1;
@@ -133,9 +174,12 @@ inline static int node_create(db_t *db, btree_node* node, int leaf, int type){
     return node_flush(db,node);
 }
 
+/** 
+ * @brief 释放文件数据库的数据块
+*/
 inline static void node_destroy(db_t *db, btree_node *node){
     node->free = db->free;
-    db->free = node->self;
+    db->free = node->self;// 加入空闲链表中
     node->num = 0;
     node->use = 0;
     if(node->type == TYPE_KEY){
@@ -148,6 +192,13 @@ inline static void node_destroy(db_t *db, btree_node *node){
     return;
 }
 
+/**
+ * @brief create dateabase file, mode default 0664 创建数据库
+ * @param[in] path 数据库文件路径
+ * @param[in] key_type DB_STRINGKEY, DB_BYTESKEY, DB_INT32KEY, DB_INT64KEY
+ * @param[in] max_key_size key长度最大值
+ * @return ==0 if successful, ==-1 error
+*/
 int db_create(char *path, int key_type, size_t max_key_size){
     switch (key_type)
     {
@@ -212,7 +263,7 @@ int db_create(char *path, int key_type, size_t max_key_size){
     db->key_align = key_align;
     db->M = M;
     db->key_total = 0;
-    db->key_use_block = 1;// root block never be free
+    db->key_use_block = 1;// Btree root的数据块，绝对不会被释放
     db->value_use_block = 0;
     db->free = 0;
     db->current = 0;
@@ -226,7 +277,7 @@ int db_create(char *path, int key_type, size_t max_key_size){
     btree_node *root = (btree_node *)(buf + DB_HEAD_SIZE);
     root->self = DB_HEAD_SIZE;
     root->leaf = BTREE_LEAF;
-    root->use = 1;
+    root->use = 1;// Btree root的数据块，绝对不会被释放
     if(node_flush(db, root) != DB_BLOCK_SIZE){
         close(fd);
         free(buf);
@@ -238,9 +289,17 @@ int db_create(char *path, int key_type, size_t max_key_size){
     return 0;
 }
 
+/**
+ * @brief 校验数据库的一致性
+ * @param[in] db 数据库句柄
+ * @return ==0 if successful, ==-1 error
+*/
 int db_checker(db_t *db){
     struct stat stat;
-    fstat(db->fd,&stat);
+    if(fstat(db->fd, &stat) == -1){
+        return -1;
+    }
+
     if(stat.st_size < DB_HEAD_SIZE + DB_BLOCK_SIZE || (stat.st_size-DB_HEAD_SIZE)%DB_BLOCK_SIZE != 0){
         return -1;
     }
@@ -276,6 +335,7 @@ int db_checker(db_t *db){
         return -1;
     }
 
+    // 校验每个数据块的数目是否一致
     btree_node *node = (btree_node *)((char*)db + DB_HEAD_SIZE + DB_BLOCK_SIZE * 0);
     off_t i;
     size_t key_total=0,value_total=0,key_use_block=0,value_use_block=0;
@@ -294,13 +354,6 @@ int db_checker(db_t *db){
             }
         }
     }
-    // printf("\n\nkey_total=%lu,value_total=%lu,db->key_total=%lu\n"
-    //     "key_use_block=%lu,db->key_use_block=%lu\n"
-    //     "value_use_block=%lu,db->value_use_block=%lu\n",
-    //     key_total,value_total,db->key_total,
-    //     key_use_block, db->key_use_block,
-    //     value_use_block, db->value_use_block
-    // );
     if(key_total != value_total 
         || key_total != db->key_total
         || key_use_block != db->key_use_block
@@ -311,6 +364,12 @@ int db_checker(db_t *db){
     return 0;
 }
 
+/**
+ * @brief open dateabase file 打开数据库
+ * @param[out] db 数据库句柄
+ * @param[in] path 数据库文件路径
+ * @return ==0 if success, ==-1 error
+*/
 int db_open(db_t **db, char *path){
     int fd = open(path, O_RDWR);
     if(fd == -1){
@@ -326,7 +385,7 @@ int db_open(db_t **db, char *path){
     (*db)->fd = fd;
 
     head_seek(*db);
-
+    // 校验数据库
     if(db_checker(*db) == -1){
         close(fd);
         free(*db);
@@ -355,6 +414,10 @@ int db_open(db_t **db, char *path){
     return 0;
 }
 
+/**
+ * @brief close dateabase file 关闭数据库
+ * @param[in] db 数据库句柄
+*/
 void db_close(db_t *db){
     close(db->fd);
     free(db);
@@ -374,16 +437,21 @@ inline static int key_binary_search(db_t *db, btree_node *node, void* target)
             high = mid - 1;
         }
 	}
-
 	return -low-1;
 }
 
-#define keycpy(db,dest,src,n) memmove(dest,src,db->key_align * (n+1));// include src[n]->child
+#define keycpy(db,dest,src,n) memmove(dest,src,(db)->key_align * ((n)+1));// 需要包括 src[n]->child
 
+/**
+ * @brief 分裂Btree节点
+ * 将sub_x拆分，一半给sub_y，中间上升到node[position]
+ * @param db 
+ * @param node 
+ * @param position 
+ * @param sub_x node->child[position] = sub_x
+ * @param sub_y node->child[position+1] = sub_y
+ */
 inline static void btree_split_child(db_t* db, btree_node *node, int position, btree_node *sub_x, btree_node *sub_y){
-    // node->child[position] = sub_x
-    // node->child[position+1] = sub_y
-    // 将sub_x拆分，一半给sub_y，中间上升到node
     size_t n = ceil(db->M);
 
     keycpy(db, btree_key_ptr(db, sub_y, 0), btree_key_ptr(db, sub_x, n+1), sub_x->num-n-1);
@@ -401,10 +469,16 @@ inline static void btree_split_child(db_t* db, btree_node *node, int position, b
     node_flush(db, sub_y);
 }
 
+/**
+ * @brief 合并Btree节点
+ * 将sub_x和sub_y合并，node[position]下降
+ * @param db 
+ * @param node 
+ * @param position 
+ * @param sub_x node->child[position] = sub_x
+ * @param sub_y node->child[position+1] = sub_y
+ */
 inline static int btree_merge(db_t* db, btree_node *node, int position, btree_node *sub_x, btree_node *sub_y){
-    // node->child[position] = sub_x
-    // node->child[position+1] = sub_y
-    // 将sub_x和sub_y合并，node[position]下降
     memcpy(btree_key_ptr(db, sub_x, sub_x->num)->key, btree_key_ptr(db, node, position)->key, db->key_align - sizeof(btree_key));
     btree_key_ptr(db, sub_x, sub_x->num)->value = btree_key_ptr(db, node, position)->value;
 
@@ -417,20 +491,29 @@ inline static int btree_merge(db_t* db, btree_node *node, int position, btree_no
 
     node_destroy(db, sub_y);
 
-    if(node->num == 0){// must be root
+    if(node->num != 0){
+        node_flush(db, sub_x);
+        node_flush(db, node);
+        return 0;
+    }else{
+        // must be root
         node->num = sub_x->num;
         node->leaf = sub_x->leaf;
         memcpy((char*)node + sizeof(btree_node),(char*)sub_x + sizeof(btree_node),DB_BLOCK_SIZE - sizeof(btree_node));
         node_destroy(db, sub_x);
         node_flush(db, node);
         return 1;
-    }else{
-        node_flush(db, sub_x);
-        node_flush(db, node);
-        return 0;
     }
 }
 
+/**
+ * @brief insert key 插入值
+ * @param[in] db 数据库句柄
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
+ * @param[in] value
+ * @param[in] value_size value_size can't too large 不能太大
+ * @return ==1 if success, ==0 if key repeat, ==-1 error
+*/
 int db_insert(db_t* db, void* key, void *value, size_t value_size){
     if(db->key_type == DB_STRINGKEY && strlen((char*)key) >= db->key_size){
         errno = EINVAL;
@@ -457,12 +540,12 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
     if(node->num >= db->M-1){
         // root is full 根节点已满
         
-        if(node_create(db, sub_x, node->leaf, TYPE_KEY) == -1 || node_create(db, sub_y, sub_x->leaf, TYPE_KEY) == -1){
+        if(node_create(db, sub_x, node->leaf, TYPE_KEY) == -1 || node_create(db, sub_y, node->leaf, TYPE_KEY) == -1){
             return -1;
         }
 
         sub_x->num = node->num;
-        memcpy((char*)sub_x + sizeof(btree_node),(char*)node + sizeof(btree_node),DB_BLOCK_SIZE - sizeof(btree_node));
+        memcpy((char*)sub_x + sizeof(btree_node), (char*)node + sizeof(btree_node), DB_BLOCK_SIZE - sizeof(btree_node));
 
         node->num = 0;
         node->leaf = BTREE_NON_LEAF;
@@ -474,24 +557,28 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
     while(node->leaf == BTREE_NON_LEAF){
         i = key_binary_search(db, node, key);
         if(i >= 0){
+            // 关键字已存在
             return 0;
         }
 
         i = -(i+1);
         
+        // 需要判断子节点是否已满
         node_seek(db, sub_x, btree_key_ptr(db,node,i)->child);
 
         if(sub_x->num < db->M-1){
-            // child is no full
+            // child is no full 子节点未满
             memcpy(node, sub_x, DB_BLOCK_SIZE);
             continue;
         }
 
-        // child is full 子节点已满
+        // child is full 子节点已满，开始分裂
         if(node_create(db, sub_y, sub_x->leaf, TYPE_KEY) == -1){
             return -1;
         }
         btree_split_child(db, node, i, sub_x, sub_y);
+
+        // 判断上升的关键字
         rc = db->key_cmp(key, btree_key_ptr(db,node,i)->key, db->key_size);
         if(rc == 0){
             // 上升的关键字相同
@@ -500,31 +587,33 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
             // 上升的关键字更大
             memcpy(node, sub_y, DB_BLOCK_SIZE);
         }else{
+            // 上升的关键字更小
             memcpy(node, sub_x, DB_BLOCK_SIZE);
         }
     }
 
     i = key_binary_search(db, node, key);
     if(i >= 0){
+        // 关键字已存在
         return 0;
     }
 
     i = -(i+1);
 
-    // 分配合适的btree_value文件块
+    // 寻找合适的btree_value数据块
     if(db->current != 0L){
         node_seek(db, valnode, db->current);
         if(valnode->last + db_align(sizeof(btree_value) + value_size, DB_ALIGNMENT) > DB_BLOCK_SIZE){
+            // 当前的btree_value数据块不够空间分配
             db->current = 0L;
             head_flush(db);
         }
     }
-    if(db->current == 0L){
-        if(node_create(db, valnode, 0, TYPE_VALUE) == -1){
-            return -1;
-        }
+    if(db->current == 0L && node_create(db, valnode, 0, TYPE_VALUE) == -1){
+        return -1;
     }
 
+    // 先存储value
     btree_value_ptr(valnode,valnode->last)->size = value_size;
     memcpy(btree_value_ptr(valnode,valnode->last)->value, value, value_size);
     size_t last = valnode->last;
@@ -532,7 +621,8 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
     valnode->num++;
     node_flush(db, valnode);
 
-    // leaf node right shift one position 叶子节点右移1个空位
+    // 再存储关键字
+    // leaf node right shift one position 叶子节点右移腾出一个空位
     keycpy(db, btree_key_ptr(db,node,i+1), btree_key_ptr(db,node,i), node->num-i);
     switch (db->key_type)
     {
@@ -545,7 +635,7 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
         memcpy(btree_key_ptr(db,node,i)->key, key, db->key_size);
         break;
     }
-    btree_key_ptr(db, node, i)->value = valnode->self + last;
+    btree_key_ptr(db, node, i)->value = valnode->self + last; // 记录value所在数据块的位置 + 偏移
     node->num++;
     node_flush(db, node);
     db->key_total++;
@@ -553,6 +643,12 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
     return 1;
 }
 
+/**
+ * @brief delete key 删除值
+ * @param[in] db 数据库句柄
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
+ * @return ==1 if success, ==0 if key no found, ==-1 error
+*/
 int db_delete(db_t* db, void* key){
     if(db->key_type == DB_STRINGKEY && strlen((char*)key) >= db->key_size){
         errno = EINVAL;
@@ -567,7 +663,7 @@ int db_delete(db_t* db, void* key){
     btree_node *sub_x = (btree_node *)((char*)db + DB_HEAD_SIZE + DB_BLOCK_SIZE * 2);
     btree_node *sub_y = (btree_node *)((char*)db + DB_HEAD_SIZE + DB_BLOCK_SIZE * 3);
     btree_node *sub_w = (btree_node *)((char*)db + DB_HEAD_SIZE + DB_BLOCK_SIZE * 4);
-    // 删除只会发生在叶子节点，在由上往下的遍历中，需要保证叶子节点有足够的关键字数，大于ceil(M)
+    /* 删除只会发生在叶子节点，在由上往下的遍历中，需要保证叶子节点有足够的关键字数（大于ceil(M)） */
     /*       __  node       */
     /*     /    /    \      */
     /*  sub_w  sub_x sub_y  */
@@ -588,24 +684,27 @@ int db_delete(db_t* db, void* key){
             break;
         }
 
-        // match when in internal 在非叶子节点中匹配到，需要找到在前缀/后缀关键字（只会在叶子结点）
+        // match when in internal 在非叶子节点中匹配到，需要找到在前缀或后缀关键字（该关键字只会在叶子结点中）
         if(i >= 0){
+            // 判断左子树是否方便删除前缀关键字（左子树关键字个数大于ceil(M)）
             node_seek(db, sub_x, btree_key_ptr(db,node,i)->child);
             if(sub_x->num > ceil(db->M)){
-                // 寻找左子树的最大关键字
+                // 寻找前缀关键字，即是寻找左子树的最大关键字
                 flag = MORE;
                 i_match = i;
                 memcpy(node_match, node, DB_BLOCK_SIZE);
                 memcpy(node, sub_x, DB_BLOCK_SIZE);
             }else{
+                // 判断右子树是否方便删除后缀关键字（右子树关键字个数大于ceil(M)）
                 node_seek(db,sub_y,btree_key_ptr(db,node,i+1)->child);
                 if(sub_y->num > ceil(db->M)){
-                    // 寻找右子树的最小关键字
+                    // 寻找后缀关键字，即是寻找右子树的最小关键字
                     flag = LESS;
                     i_match = i;
                     memcpy(node_match, node, DB_BLOCK_SIZE);
                     memcpy(node, sub_y, DB_BLOCK_SIZE);
                 }else{
+                    // 左右子树都不方便，则合并
                     if(!btree_merge(db, node, i, sub_x, sub_y)){
                         memcpy(node, sub_x, DB_BLOCK_SIZE);
                     }
@@ -616,7 +715,7 @@ int db_delete(db_t* db, void* key){
         
         i = -(i+1);
 
-        // need prepare , make sure child have enough key 需要保证叶子节点有足够的关键字数
+        // need prepare , make sure child have enough key 自上而下调整子树，保证最后在叶子节点处方便删除关键字（自上而下，确保子树关键字个数大于ceil(M)）
         node_seek(db, sub_x, btree_key_ptr(db,node,i)->child);
 
         if(sub_x->num > ceil(db->M)){
@@ -634,7 +733,7 @@ int db_delete(db_t* db, void* key){
         }
         
         if(i+1<=node->num && sub_y->num>ceil(db->M)){
-            // borrow from right 从右兄弟借一个关键字
+            // borrow from right 从子树的右兄弟借
             memcpy(btree_key_ptr(db,sub_x,sub_x->num)->key, btree_key_ptr(db,node,i)->key, db->key_align - sizeof(btree_key));
             btree_key_ptr(db,sub_x,sub_x->num)->value = btree_key_ptr(db,node,i)->value;
             btree_key_ptr(db,sub_x,sub_x->num+1)->child = btree_key_ptr(db,sub_y,0)->child;
@@ -650,7 +749,7 @@ int db_delete(db_t* db, void* key){
             node_flush(db,sub_y);
             memcpy(node,sub_x,DB_BLOCK_SIZE);
         }else if(i-1>=0 && sub_w->num>ceil(db->M)){
-            // borrow from left 从左兄弟借一个关键字
+            // borrow from left 从子树的左兄弟借
             keycpy(db, btree_key_ptr(db,sub_x,1),btree_key_ptr(db,sub_x,0), sub_x->num);
             memcpy(btree_key_ptr(db,sub_x,0)->key, btree_key_ptr(db,node,i-1)->key, db->key_align - sizeof(btree_key));
             btree_key_ptr(db,sub_x,0)->value = btree_key_ptr(db,node,i-1)->value;
@@ -682,7 +781,7 @@ int db_delete(db_t* db, void* key){
 
     off_t offset = 0;
     if(flag == LESS){
-        // 后缀关键字是右子树的最小关键字
+        // 找到后缀关键字，即是右子树的最小关键字
         offset = btree_key_ptr(db,node_match,i_match)->value;
 
         memcpy(btree_key_ptr(db,node_match,i_match)->key, btree_key_ptr(db,node,0)->key, db->key_align - sizeof(btree_key));
@@ -692,7 +791,7 @@ int db_delete(db_t* db, void* key){
         node_flush(db,node_match);
         node_flush(db,node);
     }else if(flag == MORE){
-        // 前缀关键字是左子树的最大关键字
+        // 找到前缀关键字，即是左子树的最大关键字
         offset = btree_key_ptr(db,node_match,i_match)->value;
 
         memcpy(btree_key_ptr(db,node_match,i_match)->key, btree_key_ptr(db,node,node->num-1)->key, db->key_align - sizeof(btree_key));
@@ -716,6 +815,7 @@ int db_delete(db_t* db, void* key){
     // release value block 释放关键字对应的value
     node_seek(db, node, DB_HEAD_SIZE + ((offset - DB_HEAD_SIZE)& ~(DB_BLOCK_SIZE-1)));
     node->num--;
+    // btree_value的数据块，引用数为0时，释放该数据块
     if(node->num == 0){
         if(node->self == db->current){
             db->current = 0;
@@ -730,6 +830,14 @@ int db_delete(db_t* db, void* key){
     return 1;
 }
 
+/**
+ * @brief search key 查询值
+ * @param[in] db 数据库句柄
+ * @param[in] key key_size can't exceed max_key_size 需要保证key类型和创建数据库时一致
+ * @param[out] value
+ * @param[in] value_size 需要保证空间足够大
+ * @return >=0 if success, ==-1 error
+*/
 int db_search(db_t* db, void* key, void *value, size_t value_size){
     if(db->key_type == DB_STRINGKEY && strlen((char*)key) >= db->key_size){
         errno = EINVAL;
@@ -760,4 +868,42 @@ int db_search(db_t* db, void* key, void *value, size_t value_size){
 
     errno = ENOMSG;
     return -1;
+}
+
+/***************************************/
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+
+#define COUNT 100000L
+#define PATH "./test.db"
+
+int main(){
+    db_t* db;
+    int i,rc;
+    char value[128];
+
+    // 创建数据库
+    unlink(PATH);
+    db_create(PATH,DB_INT32KEY,sizeof(int));
+
+    // 打开数据库
+    db_open(&db,PATH);
+
+    // 插入操作
+    for(i=0;i<COUNT;i++){
+        sprintf(value,"%d",i);
+        db_insert(db,&i,value,strlen(value));
+    }
+
+    //查询操作
+    i = 0;
+    bzero(value,sizeof(value));
+    rc = db_search(db,&i,value,sizeof(value));
+    printf("search key: %d value: %.*s\n",i,rc,value);
+
+    // 关闭数据库
+    db_close(db);
+
+    return 0;
 }
