@@ -103,7 +103,7 @@ static int cmp_int64(void *a, void *b, size_t n){
 }
 
 /** 
- * @brief 读出文件数据库的头，即是句柄
+ * @brief 读出文件数据库的头，即是数据库句柄
 */
 inline static ssize_t head_seek(db_t *db){
     int fd = db->fd;
@@ -115,7 +115,7 @@ inline static ssize_t head_seek(db_t *db){
 }
 
 /** 
- * @brief 写入文件数据库的头，即是句柄
+ * @brief 写入文件数据库的头，即是数据库句柄
 */
 inline static ssize_t head_flush(db_t *db){
     return pwrite(db->fd,db,DB_HEAD_SIZE,0);
@@ -234,6 +234,7 @@ int db_create(char *path, int key_type, size_t max_key_size){
         return -1;
     }
 
+    // 需要预留一个位置，比如M=5（关键字个数是4），分裂后变成左2右1，右插入变成左2右2，合并后变成M=6（关键字个数变成了5）
     size_t M = (DB_BLOCK_SIZE - sizeof(btree_node))/key_align - 1;
     if(M < 3){
         errno = EINVAL;
@@ -263,7 +264,7 @@ int db_create(char *path, int key_type, size_t max_key_size){
     db->key_align = key_align;
     db->M = M;
     db->key_total = 0;
-    db->key_use_block = 1;// Btree root的数据块，绝对不会被释放
+    db->key_use_block = 1;// Btree根的数据块，绝对不会被释放
     db->value_use_block = 0;
     db->free = 0;
     db->current = 0;
@@ -277,7 +278,7 @@ int db_create(char *path, int key_type, size_t max_key_size){
     btree_node *root = (btree_node *)(buf + DB_HEAD_SIZE);
     root->self = DB_HEAD_SIZE;
     root->leaf = BTREE_LEAF;
-    root->use = 1;// Btree root的数据块，绝对不会被释放
+    root->use = 1;// Btree根的数据块，绝对不会被释放
     if(node_flush(db, root) != DB_BLOCK_SIZE){
         close(fd);
         free(buf);
@@ -444,7 +445,7 @@ inline static int key_binary_search(db_t *db, btree_node *node, void* target)
 
 /**
  * @brief 分裂Btree节点
- * 将sub_x拆分，一半给sub_y，中间上升到node[position]
+ * 将sub_x分裂，一半给sub_y，中间上升到node[position]
  * @param db 
  * @param node 
  * @param position 
@@ -471,7 +472,7 @@ inline static void btree_split_child(db_t* db, btree_node *node, int position, b
 
 /**
  * @brief 合并Btree节点
- * 将sub_x和sub_y合并，node[position]下降
+ * 将sub_x和sub_y和node[position]合并
  * @param db 
  * @param node 
  * @param position 
@@ -613,7 +614,7 @@ int db_insert(db_t* db, void* key, void *value, size_t value_size){
         return -1;
     }
 
-    // 先存储value
+    // 先存储值
     btree_value_ptr(valnode,valnode->last)->size = value_size;
     memcpy(btree_value_ptr(valnode,valnode->last)->value, value, value_size);
     size_t last = valnode->last;
@@ -874,8 +875,9 @@ int db_search(db_t* db, void* key, void *value, size_t value_size){
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <assert.h>
 
-#define COUNT 100000L
+#define COUNT 100000
 #define PATH "./test.db"
 
 int main(){
@@ -885,22 +887,30 @@ int main(){
 
     // 创建数据库
     unlink(PATH);
-    db_create(PATH,DB_INT32KEY,sizeof(int));
+    assert(db_create(PATH,DB_INT32KEY,sizeof(int)) == 0);
 
     // 打开数据库
-    db_open(&db,PATH);
+    assert(db_open(&db,PATH) == 0);
 
     // 插入操作
     for(i=0;i<COUNT;i++){
         sprintf(value,"%d",i);
-        db_insert(db,&i,value,strlen(value));
+        assert(db_insert(db,&i,value,strlen(value)) == 1);
     }
+    printf("insert key from %d to %d\n",0,COUNT);
 
     //查询操作
     i = 0;
     bzero(value,sizeof(value));
     rc = db_search(db,&i,value,sizeof(value));
+    assert(rc >= 0);
     printf("search key: %d value: %.*s\n",i,rc,value);
+
+    // 删除操作
+    for(i=0;i<COUNT;i++){
+        assert(db_delete(db,&i) == 1);
+    }
+    printf("delete key from %d to %d\n",0,COUNT);
 
     // 关闭数据库
     db_close(db);
