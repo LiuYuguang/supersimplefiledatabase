@@ -427,8 +427,8 @@ void db_close(db_t *db){
 inline static int key_binary_search(db_t *db, btree_node *node, void* target)
 {
     int low = 0, high = node->num - 1, mid, rc;
-	while (low <= high) {
-		mid = low + (high - low) / 2;
+    while (low <= high) {
+        mid = low + (high - low) / 2;
         rc = db->key_cmp(target, btree_key_ptr(db,node,mid)->key, db->key_size);
         if(rc == 0){
             return mid;
@@ -437,8 +437,8 @@ inline static int key_binary_search(db_t *db, btree_node *node, void* target)
         }else{
             high = mid - 1;
         }
-	}
-	return -low-1;
+    }
+    return -low-1;
 }
 
 #define keycpy(db,dest,src,n) memmove(dest,src,(db)->key_align * ((n)+1));// 需要包括 src[n]->child
